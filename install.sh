@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SCRIPT_DIR/gh-accounts.sh"
+
 usage() {
     cat <<USAGE
 Usage: $0 [--dest DIR]
@@ -14,7 +17,6 @@ USAGE
 }
 
 BIN_DIR="$(pwd)/bin"
-SCRIPT="$(pwd)/gh-accounts.sh"
 
 while [[ ${1:-} != "" ]]; do
     case "$1" in
@@ -35,16 +37,17 @@ while [[ ${1:-} != "" ]]; do
     shift
 done
 
+if [ ! -f "$SCRIPT" ]; then
+    echo "Error: gh-accounts.sh not found at $SCRIPT" >&2
+    exit 1
+fi
+
 mkdir -p "$BIN_DIR"
 
-# Ensure script is executable
-if [ -f "$SCRIPT" ]; then
-    chmod +x "$SCRIPT" || true
-fi
+chmod +x "$SCRIPT"
 
 LINK="$BIN_DIR/gh-accounts"
 if [ -e "$LINK" ] || [ -L "$LINK" ]; then
-    echo "Removing existing link: $LINK"
     rm -f "$LINK"
 fi
 
