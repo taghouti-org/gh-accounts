@@ -4,107 +4,106 @@
 
 ## Overview
 
-`gh-accounts` is a small terminal UI (TUI) script that helps you manage multiple GitHub SSH identities and the related `~/.ssh/config` entries. It stores accounts in `~/.ssh/.gh_accounts`, can generate keys, add them to `ssh-agent`, and update Git global config for the selected primary account.
-
-![alt text](image.png)
+`gh-accounts` is a terminal UI (TUI) for managing multiple GitHub SSH identities. It stores accounts in `~/.ssh/.gh_accounts`, generates keys, manages `~/.ssh/config`, and updates your Git global config for the selected primary account.
 
 ## Requirements
 
-- **Bash** (POSIX + some bashisms)
-- **ssh-agent** / **ssh-add**
-- **ssh-keygen** (for generating keys)
-- **git** (for updating global config)
-- **python3** (used for config editing)
-- Terminal with `tput` support (most terminals)
+- **Bash** 4+
+- **ssh-agent** / **ssh-add** / **ssh-keygen**
+- **git**
+- **curl** (for GitHub API verification, optional)
+- Terminal with `tput` support
+
+> python3 is **no longer required** — config management is pure bash.
 
 ## Installation
 
-Quick install using the provided installer (recommended):
-
 ```bash
-bash install.sh            # creates ./bin/gh-accounts symlink to gh-accounts.sh
-# or install to a custom location, e.g. ~/.local/bin
-bash install.sh --dest ~/.local/bin
+bash install.sh                     # symlink to ./bin/gh-accounts
+bash install.sh --dest ~/.local/bin # or custom location
 ```
 
-Make sure the destination directory is in your `PATH`, for example add to your shell profile:
+Make sure the destination is in your `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Manual install:
-
-1. Make the script executable:
-
-```bash
-chmod +x gh-accounts.sh
-```
-
-2. Move it somewhere on your PATH (optional):
-
-```bash
-mv gh-accounts.sh /usr/local/bin/gh-accounts
-```
-
 ## Usage
 
-Run the script from a terminal:
-
 ```bash
-./gh-accounts.sh
+gh-accounts
 ```
 
-The script requires an interactive terminal. If you see "error: gh-accounts requires an interactive terminal.", run it from a tty.
+### Keybindings
 
-Keybindings inside the TUI:
+| Key | Action |
+|-----|--------|
+| `a` | Add new account (username, email, host alias, key file, notes) |
+| `d` / `Del` | Delete selected account |
+| `s` | Set selected account as primary (updates global git config + SSH config) |
+| `t` | Test SSH auth for selected account |
+| `T` | Test SSH auth for **all** accounts |
+| `r` | Show repo config helper (git commands for a local repo) |
+| `i` | Import existing SSH key from `~/.ssh/` |
+| `R` | Rotate SSH key (generates new keypair, backs up old) |
+| `V` | Verify username via GitHub API |
+| `/` | Filter accounts (type to search, Enter to confirm, Esc to clear) |
+| `S` | Cycle sort order: none → name → status → role → none |
+| `?` | Show help screen |
+| `j` / `↓` | Move down |
+| `k` / `↑` | Move up |
+| `PgDn` / `Ctrl-D` | Page down |
+| `PgUp` / `Ctrl-U` | Page up |
+| `q` | Quit |
 
-- **a**: Add account (username, email, host alias, key file)
-- **d**: Delete account
-- **s**: Set selected account as primary (updates global git config)
-- **t**: Test SSH authentication for selected account
-- **r**: Show repo config helper for selected account
-- **/**: Filter accounts
-- **q**: Quit
+### Environment Variables
 
-Signal handling
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GH_ACCOUNTS_FLASH` | `0.8` | Duration (seconds) for flash messages |
 
-- Pressing Ctrl-C (SIGINT) will now run the cleanup routine and exit the script, restoring the terminal to its previous state. The script traps SIGINT/SIGTERM and calls cleanup, so the terminal should not remain attached after Ctrl-C.
+## Features
 
-## Files and storage
+- **Multi-account management** — Add, delete, and switch between multiple GitHub SSH identities
+- **Primary account** — One account gets the `github.com` host; others use custom host aliases
+- **SSH key generation** — Choose ed25519, RSA (4096-bit), or ECDSA (521-bit)
+- **Key rotation** — Regenerate keys for existing accounts (old keys backed up as `.old`)
+- **Import keys** — Detect and import existing SSH keys not yet tracked
+- **Batch testing** — Test SSH auth for all accounts at once
+- **GitHub verification** — Verify usernames via GitHub API
+- **SSH config management** — Auto-manages `~/.ssh/config` with marked blocks, backed up before each change
+- **Auto ssh-agent** — Starts `ssh-agent` automatically if not running
+- **Account sorting** — Sort by name, status, or role
+- **Account notes** — Optional notes field for each account
+- **Key file indicator** — Detail panel shows green/red for key file existence
+- **Responsive layout** — Adapts columns based on terminal width
+- **Store migration** — Automatically migrates older 5-field store to 6-field format
 
-- Accounts are stored in `~/.ssh/.gh_accounts` (one entry per line, pipe-separated).
-- The script manages `~/.ssh/config` by adding/removing blocks marked with `# gh-accounts:` comments. It rewrites managed blocks when the primary account changes.
+## Files
 
-## Examples
+| File | Purpose |
+|------|---------|
+| `~/.ssh/.gh_accounts` | Account store (pipe-delimited, one line per account) |
+| `~/.ssh/config` | SSH config (managed blocks marked with `# gh-accounts:`) |
+| `~/.ssh/config.bak` | Backup of SSH config before each rewrite |
 
-- Add an account via the TUI: press `a`, enter `username`, `email`, `host alias` (e.g. `github-username`), and `key file` name (e.g. `id_ed25519_username`). The key will be generated with `ssh-keygen` if it doesn't exist.
-- To ensure your keys are available to the agent before running the TUI:
+### Store Format
 
-```bash
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_ed25519_you
 ```
+username|email|host-alias|keyfile|status|notes
+```
+
+## Signal Handling
+
+Ctrl-C (SIGINT) and SIGTERM run the cleanup routine and restore the terminal. SIGWINCH triggers a full redraw on terminal resize.
 
 ## Troubleshooting
 
-- Terminal remains in alternate screen or cursor hidden after exit: Ensure the script ran its `cleanup()` (it traps EXIT, INT, TERM). If the terminal is still in an odd state, run:
-
-```bash
-tput rmcup || true
-tput cnorm || true
-reset
-```
-
-- The script says it needs an interactive terminal: run it in a normal terminal (not from a backgrounded job or non-interactive environment).
-
-- SSH authentication failures: verify your key files, ensure `ssh-agent` is running and that the key is added with `ssh-add`.
-
-## Contributing
-
-Patches, bug reports and improvements are welcome. Please open an issue or submit a pull request.
-
-When editing `gh-accounts.sh`, keep terminal state handling intact: `alt_screen_on`, `alt_screen_off`, cursor hiding/showing, and the `cleanup()` trap are important to avoid leaving the terminal in an unusable state.
+- **Terminal stuck after exit**: Run `tput rmcup; tput cnorm; reset`
+- **"requires an interactive terminal"**: Run from a tty, not a backgrounded job
+- **SSH auth failures**: Verify key files exist, ssh-agent is running, keys are added
+- **Permission denied on install**: Use `--dest ~/.local/bin` or run with `sudo` for `/usr/local/bin`
 
 ## License
 

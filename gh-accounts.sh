@@ -7,6 +7,7 @@ set -uo pipefail
 SSH_DIR="$HOME/.ssh"
 CONFIG="$SSH_DIR/config"
 STORE="$SSH_DIR/.gh_accounts"
+FLASH_DURATION="${GH_ACCOUNTS_FLASH:-0.8}"
 
 # ── colours & styles ────────────────────────────────────────
 ESC=$'\033'
@@ -43,7 +44,7 @@ term_cols() { tput cols  2>/dev/null || echo 80; }
 
 cursor_hide()     { printf '%s' "${ESC}[?25l"; }
 cursor_show()     { printf '%s' "${ESC}[?25h"; }
-cursor_move()     { printf '%s' "${ESC}[$1;$2H"; }  # row col (1-based)
+cursor_move()     { printf '%s' "${ESC}[$1;$2H"; }
 clear_screen()    { printf '%s' "${ESC}[2J${ESC}[H"; }
 clear_line()      { printf '%s' "${ESC}[2K"; }
 save_cursor()     { printf '%s' "${ESC}[s"; }
@@ -62,12 +63,10 @@ repeat_char() {
 }
 
 # ── box drawing helpers ──────────────────────────────────────
-# draw_box row col width height title [color]
 draw_box() {
   local row=$1 col=$2 w=$3 h=$4 title="$5" color="${6:-$C_BORDER}"
   local r
-  
-  # Top border
+
   cursor_move "$row" "$col"
   printf '%s' "$color"
   if [[ -n "$title" ]]; then
@@ -80,7 +79,6 @@ draw_box() {
   fi
   printf '%s' "$RESET"
 
-  # Side borders
   for (( r=1; r<h-1; r++ )); do
     cursor_move "$(( row + r ))" "$col"
     printf '%s│%s' "$color" "$RESET"
@@ -88,12 +86,11 @@ draw_box() {
     printf '%s│%s' "$color" "$RESET"
   done
 
-  # Bottom border
   cursor_move "$(( row + h - 1 ))" "$col"
   printf '%s╰%s╯%s' "$color" "$(repeat_char $(( w - 2 )) '─')" "$RESET"
 }
 
-clear_area() {  # row col width height
+clear_area() {
   local row=$1 col=$2 w=$3 h=$4
   local r
   for (( r=0; r<h; r++ )); do
@@ -102,12 +99,9 @@ clear_area() {  # row col width height
   done
 }
 
-
-# read single char (no enter)
 read_key() {
   local key
   IFS= read -r -s -n1 key
-  # handle escape sequences (arrows etc)
   if [[ "$key" == $'\033' ]]; then
     local seq1 seq2
     IFS= read -r -s -n1 -t 0.1 seq1 || true
@@ -118,11 +112,20 @@ read_key() {
 }
 
 # ── store helpers ─────────────────────────────────────────────
+# store format: username|email|alias|keyfile|status|notes
 store_init()    { mkdir -p "$SSH_DIR"; touch "$STORE"; chmod 600 "$STORE"; }
 store_list()    { cat "$STORE" 2>/dev/null || true; }
 store_count()   { grep -c '.' "$STORE" 2>/dev/null || echo 0; }
 store_exists()  { grep -q "^$1|" "$STORE" 2>/dev/null; }
-store_add()     { echo "$1|$2|$3|$4|unknown" >> "$STORE"; }
+
+store_validate_field() {
+  [[ "$1" == *"|"* ]] && return 1
+  return 0
+}
+
+store_add() {
+  echo "$1|$2|$3|$4|unknown|$5" >> "$STORE"
+}
 
 store_remove() {
   local tmp; tmp=$(mktemp)
@@ -130,7 +133,7 @@ store_remove() {
   mv "$tmp" "$STORE"; chmod 600 "$STORE"
 }
 
-store_get_field() {   # username field(1-5)
+store_get_field() {
   grep "^$1|" "$STORE" | head -1 | cut -d'|' -f"$2"
 }
 
@@ -144,16 +147,46 @@ store_set_primary() {
   mv "$tmp" "$STORE"; chmod 600 "$STORE"
 }
 
-store_set_status() {  # username status
+store_set_status() {
   local final; final=$(mktemp)
-  while IFS='|' read -r u e a k s; do
+  while IFS='|' read -r u e a k s n; do
     if [[ "$u" == "$1" ]]; then
-      echo "$u|$e|$a|$k|$2"
+      echo "$u|$e|$a|$k|$2|${n:-}"
     else
-      echo "$u|$e|$a|$k|$s"
+      echo "$u|$e|$a|$k|$s|${n:-}"
     fi
   done < "$STORE" > "$final"
   mv "$final" "$STORE"; chmod 600 "$STORE"
+}
+
+store_set_notes() {
+  local final; final=$(mktemp)
+  while IFS='|' read -r u e a k s n; do
+    if [[ "$u" == "$1" ]]; then
+      echo "$u|$e|$a|$k|$s|$2"
+    else
+      echo "$u|$e|$a|$k|$s|${n:-}"
+    fi
+  done < "$STORE" > "$final"
+  mv "$final" "$STORE"; chmod 600 "$STORE"
+}
+
+store_migrate() {
+  local tmp; tmp=$(mktemp)
+  local changed=false
+  while IFS='|' read -r u e a k s rest; do
+    if [[ -z "$rest" ]]; then
+      echo "$u|$e|$a|$k|$s|" >> "$tmp"
+      changed=true
+    else
+      echo "$u|$e|$a|$k|$s|$rest" >> "$tmp"
+    fi
+  done < "$STORE" > "$tmp"
+  if $changed; then
+    mv "$tmp" "$STORE"; chmod 600 "$STORE"
+  else
+    rm -f "$tmp"
+  fi
 }
 
 # ── layout ────────────────────────────────────────────────────
@@ -184,16 +217,7 @@ update_dims() {
   compute_columns
 }
 
-pad_right() {   # text width [fill_char]
-  local text="$1" width="$2" fill="${3:- }"
-  local visible; visible=$(printf '%s' "$text" | sed 's/\x1b\[[0-9;]*m//g')
-  local vlen=${#visible}
-  local pad=$(( width - vlen ))
-  printf '%s' "$text"
-  if (( pad > 0 )); then printf '%*s' "$pad" '' | tr ' ' "${fill}"; fi
-}
-
-truncate_str() {  # str maxlen
+truncate_str() {
   local s="$1" max="$2"
   if (( ${#s} > max )); then
     printf '%s…' "${s:0:$(( max - 1 ))}"
@@ -214,14 +238,28 @@ agent_status() {
   fi
 }
 
+ensure_ssh_agent() {
+  if ! ssh-add -l &>/dev/null; then
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]] || [[ ! -S "${SSH_AUTH_SOCK:-}" ]]; then
+      eval "$(ssh-agent -s)" &>/dev/null
+    fi
+  fi
+}
+
+key_exists() {
+  local keyfile="$1"
+  [[ -f "${SSH_DIR}/${keyfile}" ]] && return 0
+  return 1
+}
+
 draw_info_box() {
   local row=1 col=1 w=46 h=6
   draw_box $row $col $w $h "System Info" "$C_BLUE"
-  
+
   local primary; primary=$(store_get_primary)
   local count;   count=$(store_count)
   local agent;   agent=$(agent_status)
-  
+
   local agent_color="$C_RED"
   if [[ "$agent" == "Active" ]]; then
     agent_color="$C_GREEN"
@@ -231,13 +269,13 @@ draw_info_box() {
 
   cursor_move $(( row + 1 )) $(( col + 2 ))
   printf '%sActive:%s      %s' "${C_GRAY}" "${RESET}" "${primary:-none}"
-  
+
   cursor_move $(( row + 2 )) $(( col + 2 ))
   printf '%sAccounts:%s    %s' "${C_GRAY}" "${RESET}" "${count}"
-  
+
   cursor_move $(( row + 3 )) $(( col + 2 ))
   printf '%sSSH Agent:%s   %s%s%s' "${C_GRAY}" "${RESET}" "${agent_color}" "${agent}" "${RESET}"
-  
+
   cursor_move $(( row + 4 )) $(( col + 2 ))
   local cfg_status="Missing"
   if [[ -f "$CONFIG" ]]; then
@@ -250,15 +288,15 @@ draw_info_box() {
 draw_ascii_logo() {
   if (( COLS < 85 )); then return; fi
   local r=2
-  local col=$(( COLS - 37 )) # logo is 33 chars wide
-  
+  local col=$(( COLS - 37 ))
+
   cursor_move $r $col
   printf '%s┌─┐┬ ┬  ┌─┐┌─┐┌─┐┌─┐┬ ┬┌┐┌┌┬┐┌─┐%s' "$C_CYAN" "$RESET"
   cursor_move $(( r + 1 )) $col
   printf '%s│ ┬├─┤  ├─┤│  │  │ ││ ││││ │ └─┐%s' "$C_BLUE" "$RESET"
   cursor_move $(( r + 2 )) $col
   printf '%s└─┘┴ ┴  ┴ ┴└─┘└─┘└─┘└─┘┴┘└ ┴ └─┘%s' "$C_YELLOW" "$RESET"
-  
+
   cursor_move $(( r + 3 )) $col
   printf '%s GitHub SSH Account Manager TUI %s' "${C_GRAY}${DIM}" "${RESET}"
 }
@@ -272,11 +310,11 @@ draw_layout_boxes() {
 
 compute_columns() {
   local inner=$(( TABLE_WIDTH - 2 ))
-  
-  W_ACT=2
+
+W_ACT=2
   W_STATUS=8
   W_ROLE=10
-  
+
   if (( inner >= 85 )); then
     W_USER=16
     W_EMAIL=24
@@ -316,11 +354,11 @@ compute_columns() {
 draw_colheader() {
   cursor_move 9 1
   printf '%s│%s' "$C_BORDER" "$RESET"
-  
+
   printf ' '
   printf '%-*s' $W_ACT ''
   printf '%s%s%-*s%s ' "${BOLD}" "${C_CYAN}" $W_USER "USERNAME" "${RESET}"
-  
+
   if $SHOW_EMAIL; then
     printf '%s%-*s%s ' "${BOLD}" $W_EMAIL "EMAIL" "${RESET}"
   fi
@@ -330,44 +368,74 @@ draw_colheader() {
   if $SHOW_KEY; then
     printf '%s%-*s%s ' "${BOLD}" $W_KEY "KEY FILE" "${RESET}"
   fi
-  
+
   printf '%s%-*s%s ' "${BOLD}" $W_STATUS "STATUS" "${RESET}"
   printf '%s%-*s%s' "${BOLD}" $W_ROLE "ROLE" "${RESET}"
-  
+
   local printed=$(( 1 + W_ACT + 1 + W_USER + 1 ))
   if $SHOW_EMAIL; then printed=$(( printed + W_EMAIL + 1 )); fi
   if $SHOW_ALIAS; then printed=$(( printed + W_ALIAS + 1 )); fi
   if $SHOW_KEY;   then printed=$(( printed + W_KEY + 1 )); fi
   printed=$(( printed + W_STATUS + 1 + W_ROLE ))
-  
+
   local remaining=$(( TABLE_WIDTH - 1 - printed ))
   if (( remaining > 0 )); then
     repeat_char $remaining ' '
   fi
-  
+
   printf '%s│%s' "$C_BORDER" "$RESET"
-  
-  # Divider row (row 10)
+
   cursor_move 10 1
   printf '%s├%s┤%s' "$C_BORDER" "$(repeat_char $(( TABLE_WIDTH - 2 )) '─')" "$RESET"
 }
 
+sort_accounts() {
+  case "$SORT_MODE" in
+    name)
+      local sorted_tmp; sorted_tmp=$(mktemp)
+      printf '%s\n' "${FILTERED_ACCS[@]}" | sort -t'|' -k1,1 > "$sorted_tmp"
+      readarray -t FILTERED_ACCS < "$sorted_tmp"
+      rm -f "$sorted_tmp"
+      ;;
+    status)
+      local sorted_tmp; sorted_tmp=$(mktemp)
+      printf '%s\n' "${FILTERED_ACCS[@]}" | sort -t'|' -k5,5 -r > "$sorted_tmp"
+      readarray -t FILTERED_ACCS < "$sorted_tmp"
+      rm -f "$sorted_tmp"
+      ;;
+    role)
+      local primary; primary=$(store_get_primary)
+      local -a prim=() seco=()
+      for a in "${FILTERED_ACCS[@]}"; do
+        local u; u=$(echo "$a" | cut -d'|' -f1)
+        if [[ "$u" == "$primary" ]]; then
+          prim+=("$a")
+        else
+          seco+=("$a")
+        fi
+      done
+      FILTERED_ACCS=("${prim[@]}" "${seco[@]}")
+      ;;
+  esac
+}
+
 draw_table() {
   compute_columns
-  local table_rows=$(( ROWS - 11 ))  # row 11 to ROWS-3
-  local row_num=0
   local -a accs=()
 
-  while IFS='|' read -r u e a k s; do
+  while IFS='|' read -r u e a k s n; do
     [[ -z "$u" ]] && continue
     if [[ -n "$FILTER" ]]; then
-      local combined="${u}${e}${a}"
+      local combined="${u}${e}${a}${n:-}"
       [[ "${combined,,}" != *"${FILTER,,}"* ]] && continue
     fi
-    accs+=("$u|$e|$a|$k|$s")
+    accs+=("$u|$e|$a|$k|$s|${n:-}")
   done < "$STORE"
 
-  ACC_COUNT=${#accs[@]}
+  FILTERED_ACCS=("${accs[@]}")
+  sort_accounts
+
+  ACC_COUNT=${#FILTERED_ACCS[@]}
   (( SELECTED >= ACC_COUNT )) && SELECTED=$(( ACC_COUNT > 0 ? ACC_COUNT - 1 : 0 ))
   (( SELECTED < 0 )) && SELECTED=0
 
@@ -379,25 +447,36 @@ draw_table() {
   fi
 
   local display_row=0
-  for (( i=scroll; i<${#accs[@]}; i++ )); do
-    (( display_row >= visible_rows )) && break
+  local visible_rows_count=$(( visible_rows ))
+  for (( r=0; r<visible_rows_count; r++ )); do
+    cursor_move "$(( 11 + r ))" 1
+    printf '%s' "${RESET}"
+    clear_line
+    printf '%s│%s' "$C_BORDER" "$RESET"
+    repeat_char $(( TABLE_WIDTH - 2 )) ' '
+    printf '%s│%s' "$C_BORDER" "$RESET"
+  done
+
+  for (( i=scroll; i<${#FILTERED_ACCS[@]}; i++ )); do
+    (( display_row >= visible_rows_count )) && break
     local screen_row=$(( 11 + display_row ))
     cursor_move "$screen_row" 1
-    
+
     printf '%s│%s' "$C_BORDER" "$RESET"
 
-    IFS='|' read -r u e a k s <<< "${accs[$i]}"
+    IFS='|' read -r u e a k s n <<< "${FILTERED_ACCS[$i]}"
     local is_sel=false; (( i == SELECTED )) && is_sel=true
     local is_prim=false; [[ "$u" == "$primary" ]] && is_prim=true
+    local has_key=false; key_exists "$k" && has_key=true
 
     local star=' '; $is_prim && star="${C_YELLOW}★${RESET}"
-    
+
     if $is_sel; then
       printf '%s' "$BG_SEL"
     fi
-    
+
     printf ' %s ' "$star"
-    
+
     local u_t; u_t=$(truncate_str "$u" $W_USER)
     if $is_sel; then
       printf '%s%s%-*s%s ' "${BOLD}" "${C_CYAN}" $W_USER "$u_t" "${RESET}${BG_SEL}"
@@ -438,7 +517,7 @@ draw_table() {
       fail)    status_badge="${BG_RED}${C_RED}${BOLD}FAIL${RESET}" ;;
       *)       status_badge="${C_GRAY} -- ${RESET}" ;;
     esac
-    
+
     if $is_sel; then
       printf '%s ' "$status_badge"
       printf '%s' "$BG_SEL"
@@ -452,7 +531,7 @@ draw_table() {
     else
       role_badge="${C_GRAY}secondary${RESET}"
     fi
-    
+
     if $is_sel; then
       printf '%s' "$role_badge"
       printf '%s' "$BG_SEL"
@@ -465,19 +544,18 @@ draw_table() {
     if $SHOW_ALIAS; then printed=$(( printed + W_ALIAS + 1 )); fi
     if $SHOW_KEY;   then printed=$(( printed + W_KEY + 1 )); fi
     printed=$(( printed + W_STATUS + 1 + W_ROLE ))
-    
+
     local remaining=$(( TABLE_WIDTH - 1 - printed ))
     if (( remaining > 0 )); then
       repeat_char $remaining ' '
     fi
-    
+
     printf '%s' "${RESET}"
     printf '%s│%s\n' "$C_BORDER" "$RESET"
-    
+
     (( display_row++ ))
   done
 
-  # Blank remaining rows
   for (( r=display_row; r<visible_rows; r++ )); do
     cursor_move "$(( 11 + r ))" 1
     printf '%s│%s' "$C_BORDER" "$RESET"
@@ -498,8 +576,6 @@ draw_table() {
     printf '%s%s%s' "${C_GRAY}" "$msg" "${RESET}"
   fi
 
-  FILTERED_ACCS=("${accs[@]}")
-  
   if (( DETAIL_WIDTH > 0 )); then
     draw_detail
   fi
@@ -509,7 +585,7 @@ draw_detail() {
   local col=$(( TABLE_WIDTH + 1 ))
   local r=9
   local dw=$(( DETAIL_WIDTH - 2 ))
-  
+
   if (( ${#FILTERED_ACCS[@]} == 0 )); then
     for (( pr = r; pr < ROWS - 2; pr++ )); do
       cursor_move "$pr" $(( col + 1 ))
@@ -521,13 +597,14 @@ draw_detail() {
   fi
 
   local entry="${FILTERED_ACCS[$SELECTED]}"
-  IFS='|' read -r u e a k s <<< "$entry"
+  IFS='|' read -r u e a k s n <<< "$entry"
   local primary; primary=$(store_get_primary)
   local is_prim=false; [[ "$u" == "$primary" ]] && is_prim=true
   local host; $is_prim && host="github.com" || host="$a"
   local remote="git@${host}:${u}/repo.git"
+  local has_key=false; key_exists "$k" && has_key=true
 
-  detail_row() {  # row label value [val_color]
+  detail_row() {
     cursor_move "$1" $(( col + 1 ))
     printf ' '
     printf '%s%-10s%s ' "${C_GRAY}" "$2" "${RESET}"
@@ -541,7 +618,7 @@ draw_detail() {
     fi
   }
 
-  config_row() {  # row label value [val_color]
+  config_row() {
     cursor_move "$1" $(( col + 1 ))
     printf ' '
     printf '%s%-12s%s ' "${C_GRAY}" "$2" "${RESET}"
@@ -558,39 +635,43 @@ draw_detail() {
   detail_row $(( r   )) "User"   "${C_CYAN}${BOLD}"   "$u"
   detail_row $(( r+1 )) "Email"  "${FG}"               "$e"
   detail_row $(( r+2 )) "Alias"  "${C_PURPLE}"         "$a"
-  detail_row $(( r+3 )) "Key"    "${C_GRAY}"           "$k"
-  
+  detail_row $(( r+3 )) "Key"    "$( $has_key && echo "${C_GREEN}" || echo "${C_RED}" )" "$k"
+
   local s_color="${C_GREEN}"
   [[ "$s" != "ok" ]] && s_color="${C_RED}"
   detail_row $(( r+4 )) "Status" "$s_color"            "$s"
-  
+
   local r_val="secondary"
   $is_prim && r_val="primary"
   detail_row $(( r+5 )) "Role"   "$( $is_prim && echo "${C_YELLOW}" || echo "${C_GRAY}" )" "$r_val"
 
-  # Divider: Git Config
-  cursor_move $(( r+6 )) $(( col + 1 ))
+  if [[ -n "${n:-}" ]]; then
+    detail_row $(( r+6 )) "Notes" "${C_GRAY}" "$n"
+  fi
+
+  local div_r=$(( r+7 ))
+  if [[ -n "${n:-}" ]]; then div_r=$(( r+7 )); else div_r=$(( r+6 )); fi
+
+  cursor_move $(( div_r )) $(( col + 1 ))
   printf '%s├─ Git Config %s┤%s' "$C_BORDER" "$(repeat_char $(( dw - 14 )) '─')" "$RESET"
 
-  config_row $(( r+7 )) "user.name"  "${C_CYAN}" "$u"
-  config_row $(( r+8 )) "user.email" "${C_CYAN}" "$e"
+  config_row $(( div_r + 1 )) "user.name"  "${C_CYAN}" "$u"
+  config_row $(( div_r + 2 )) "user.email" "${C_CYAN}" "$e"
 
-  # Divider: SSH Config
-  cursor_move $(( r+9 )) $(( col + 1 ))
+  cursor_move $(( div_r + 3 )) $(( col + 1 ))
   printf '%s├─ SSH Config %s┤%s' "$C_BORDER" "$(repeat_char $(( dw - 14 )) '─')" "$RESET"
 
-  config_row $(( r+10 )) "Host"         "${C_PURPLE}" "$host"
-  config_row $(( r+11 )) "HostName"     "${FG}" "github.com"
-  config_row $(( r+12 )) "IdentityFile" "${FG}" "~/.ssh/${k}"
+  config_row $(( div_r + 4 )) "Host"         "${C_PURPLE}" "$host"
+  config_row $(( div_r + 5 )) "HostName"     "${FG}" "github.com"
+  config_row $(( div_r + 6 )) "IdentityFile" "${FG}" "~/.ssh/${k}"
 
-  local last_r=$(( r + 12 ))
+  local last_r=$(( div_r + 6 ))
   if (( ROWS >= 26 )); then
-    # Divider: Clone URL
-    cursor_move $(( r+13 )) $(( col + 1 ))
+    cursor_move $(( last_r + 1 )) $(( col + 1 ))
     printf '%s├─ Clone URL %s┤%s' "$C_BORDER" "$(repeat_char $(( dw - 13 )) '─')" "$RESET"
 
-    config_row $(( r+14 )) "git clone" "${C_ORANGE}" "$remote"
-    last_r=$(( r + 14 ))
+    config_row $(( last_r + 2 )) "git clone" "${C_ORANGE}" "$remote"
+    last_r=$(( last_r + 2 ))
   fi
 
   for (( pr = last_r + 1; pr <= ROWS - 3; pr++ )); do
@@ -601,8 +682,10 @@ draw_detail() {
 
 draw_filter_bar() {
   cursor_move "$(( ROWS - 1 ))" 1
-  printf '%s' "${BG_STATUS}${C_YELLOW}${BOLD} /Filter: ${RESET}${BG_STATUS}${FG}${FILTER}"
-  local len=$(( 10 + ${#FILTER} ))
+  local sort_label=""
+  [[ "$SORT_MODE" != "none" ]] && sort_label=" [sort: $SORT_MODE]"
+  printf '%s' "${BG_STATUS}${C_YELLOW}${BOLD} /Filter: ${RESET}${BG_STATUS}${FG}${FILTER}${sort_label}"
+  local len=$(( 10 + ${#FILTER} + ${#sort_label} ))
   local remaining=$(( COLS - len ))
   if (( remaining > 0 )); then
     repeat_char $remaining ' '
@@ -610,37 +693,43 @@ draw_filter_bar() {
   printf '%s' "${RESET}"
 }
 
-draw_flash() {  # msg [color]
+draw_flash() {
   local msg="$1" col="${2:-$C_CYAN}"
   local mlen=${#msg}
   local bw=$(( mlen + 6 ))
   local bh=3
   local br=$(( ROWS / 2 - 1 ))
   local bc=$(( (COLS - bw) / 2 ))
-  
+
   clear_area $br $bc $bw $bh
   draw_box $br $bc $bw $bh "" "$col"
   cursor_move $(( br + 1 )) $(( bc + 3 ))
   printf '%s%s%s' "${BOLD}" "$msg" "${RESET}"
-  
-  sleep 0.8
+
+  sleep "$FLASH_DURATION"
   full_redraw
 }
 
 draw_keybinds() {
   cursor_move "$ROWS" 1
   printf '%s' "${BG_STATUS}${FG}"
-  
+
   local binds=(
     "a:add"
     "d:delete"
     "s:primary"
     "t:test"
+    "T:test-all"
     "r:repo"
+    "i:import"
+    "R:rotate"
+    "V:verify"
     "/:filter"
+    "S:sort"
+    "?:help"
     "q:quit"
   )
-  
+
   printf ' '
   local len=1
   for b in "${binds[@]}"; do
@@ -651,7 +740,7 @@ draw_keybinds() {
     local btn_plain="<${key}> ${desc}  "
     len=$(( len + ${#btn_plain} ))
   done
-  
+
   local remaining=$(( COLS - len ))
   if (( remaining > 0 )); then
     repeat_char $remaining ' '
@@ -676,40 +765,79 @@ full_redraw() {
   draw_keybinds
 }
 
-# ── input helpers ─────────────────────────────────────────────
-# read a line at given position with a prompt
-read_inline() {   # row col prompt varname
-  local row=$1 col=$2 prompt="$3"
-  cursor_move "$row" "$col"
-  printf '%s%s %s' "${C_YELLOW}${BOLD}" "$prompt" "${RESET}"
-  cursor_show
-  local val=""
-  IFS= read -r val
-  cursor_hide
-  eval "$4=\"\$val\""
+draw_help() {
+  local bw=60 bh=26
+  local br=$(( (ROWS - bh) / 2 ))
+  local bc=$(( (COLS - bw) / 2 ))
+
+  clear_area $br $bc $bw $bh
+  draw_box $br $bc $bw $bh "Help — Keybindings" "$C_BLUE"
+
+  local row=$(( br + 2 ))
+  local -a help_lines=(
+    "${C_YELLOW}${BOLD}Navigation${RESET}"
+    "  j / ↓       Move down"
+    "  k / ↑       Move up"
+    "  PgDn / Ctrl-D  Page down"
+    "  PgUp / Ctrl-U  Page up"
+    ""
+    "${C_YELLOW}${BOLD}Actions${RESET}"
+    "  a           Add new account"
+    "  d / Del     Delete selected account"
+    "  s           Set as primary account"
+    "  t           Test SSH for selected"
+    "  T           Test SSH for ALL accounts"
+    "  r           Show repo config helper"
+    "  i           Import existing SSH key"
+    "  R           Rotate SSH key"
+    "  V           Verify email via GitHub API"
+    ""
+    "${C_YELLOW}${BOLD}Other${RESET}"
+    "  /           Filter accounts"
+    "  Esc         Clear filter"
+    "  S           Cycle sort (name/status/role)"
+    "  ?           Toggle this help"
+    "  q           Quit"
+  )
+
+  for line in "${help_lines[@]}"; do
+    cursor_move "$row" $(( bc + 3 ))
+    local visible; visible=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+    local vlen=${#visible}
+    printf '%s' "$line"
+    local remaining=$(( bw - 6 - vlen ))
+    if (( remaining > 0 )); then
+      repeat_char $remaining ' '
+    fi
+    (( row++ ))
+  done
+
+  cursor_move $(( br + bh - 2 )) $(( bc + 3 ))
+  printf '%s[Press any key to close]%s' "${C_GRAY}" "${RESET}"
+  read_key > /dev/null
 }
 
-# mini form in a box
+# ── input helpers ─────────────────────────────────────────────
 show_form() {
-  local bw=56 bh=10
+  local bw=56 bh=12
   local br=$(( (ROWS - bh) / 2 ))
   local bc=$(( (COLS - bw) / 2 ))
 
   clear_area $br $bc $bw $bh
   draw_box $br $bc $bw $bh "Add GitHub Account" "$C_BLUE"
 
-  local -n _user=$1 _email=$2 _alias=$3 _key=$4
+  local -n _user=$1 _email=$2 _alias=$3 _key=$4 _notes=$5
 
-  field() {   # form_row label varref default
+  field() {
     local frow=$(( br + $1 )) label="$2" def="$4"
-    cursor_move "$frow" "$(( bc + 3 ))"
+    cursor_move "$frow" $(( bc + 3 ))
     printf '%s%-12s%s' "${C_GRAY}" "$label" "${RESET}"
-    
+
     local input_width=34
-    cursor_move "$frow" "$(( bc + 17 ))"
+    cursor_move "$frow" $(( bc + 17 ))
     printf '%s%s%s' "${BG_PANEL}" "$(repeat_char $input_width ' ')" "${RESET}"
-    
-    cursor_move "$frow" "$(( bc + 17 ))"
+
+    cursor_move "$frow" $(( bc + 17 ))
     printf '%s' "${C_CYAN}"
     cursor_show
     local val=""
@@ -721,16 +849,16 @@ show_form() {
 
   field 2 "Username:"  _user  "${_user}"
   field 3 "Email:"     _email "${_email}"
-  
+
   [[ -z "${_alias}" && -n "${_user}" ]] && _alias="github-${_user}"
   [[ -z "${_key}"   && -n "${_user}" ]] && _key="id_ed25519_${_user}"
-  
+
   field 5 "Host Alias:" _alias "${_alias}"
   field 6 "Key File:"   _key   "${_key}"
+  field 8 "Notes:"      _notes "${_notes}"
 }
 
-# confirm box
-show_confirm() {  # message  → returns 0=yes 1=no
+show_confirm() {
   local msg="$1"
   local bw=50 bh=6
   local br=$(( (ROWS - bh) / 2 ))
@@ -749,7 +877,6 @@ show_confirm() {  # message  → returns 0=yes 1=no
   [[ "$key" == "y" || "$key" == "Y" ]]
 }
 
-# set-repo modal
 show_repo_modal() {
   local u="$1" e="$2" a="$3" is_prim="$4"
   local host; [[ "$is_prim" == "true" ]] && host="github.com" || host="$a"
@@ -764,11 +891,11 @@ show_repo_modal() {
   printf '%sGit Username: %s%s%s' "${C_GRAY}" "${C_GREEN}" "$u" "${RESET}"
   cursor_move "$(( br + 3 ))" "$(( bc + 4 ))"
   printf '%sGit Email:    %s%s%s' "${C_GRAY}" "${C_GREEN}" "$e" "${RESET}"
-  
+
   cursor_move "$(( br + 5 ))" "$(( bc + 4 ))"
   printf '%sEnter repo path (e.g. owner/repo) or Enter to skip:%s' "${C_YELLOW}" "${RESET}"
   cursor_move "$(( br + 6 ))" "$(( bc + 4 ))"
-  
+
   local input_width=52
   printf '%s%s%s' "${BG_PANEL}" "$(repeat_char $input_width ' ')" "${RESET}"
   cursor_move "$(( br + 6 ))" "$(( bc + 4 ))"
@@ -781,29 +908,64 @@ show_repo_modal() {
 
   cursor_move "$(( br + 8 ))" "$(( bc + 4 ))"
   printf '%sRun these commands inside your local repository:%s' "${C_GRAY}" "${RESET}"
-  
+
   cursor_move "$(( br + 10 ))" "$(( bc + 4 ))"
   printf '%sgit config user.name  "%s"%s' "${C_GREEN}" "$u" "${RESET}"
   cursor_move "$(( br + 11 ))" "$(( bc + 4 ))"
   printf '%sgit config user.email "%s"%s' "${C_GREEN}" "$e" "${RESET}"
-  
+
   cursor_move "$(( br + 12 ))" "$(( bc + 4 ))"
   if [[ -n "$rpath" ]]; then
     printf '%sgit remote set-url origin git@%s:%s.git%s' "${C_ORANGE}${BOLD}" "$host" "$rpath" "${RESET}"
   else
     printf '%sgit remote set-url origin git@%s:OWNER/REPO.git%s' "${C_GRAY}" "$host" "${RESET}"
   fi
-  
+
   cursor_move "$(( br + 14 ))" "$(( bc + 4 ))"
   printf '%s[Press any key to close]%s' "${C_GRAY}" "${RESET}"
   read_key > /dev/null
 }
 
+show_key_type_selector() {
+  local bw=40 bh=8
+  local br=$(( (ROWS - bh) / 2 ))
+  local bc=$(( (COLS - bw) / 2 ))
+
+  clear_area $br $bc $bw $bh
+  draw_box $br $bc $bw $bh "Key Type" "$C_CYAN"
+
+  cursor_move "$(( br + 2 ))" "$(( bc + 4 ))"
+  printf '%s1)%s ed25519 (Recommended)' "${C_GREEN}${BOLD}" "${RESET}"
+  cursor_move "$(( br + 3 ))" "$(( bc + 4 ))"
+  printf '%s2)%s rsa (4096-bit)' "${C_GRAY}" "${RESET}"
+  cursor_move "$(( br + 4 ))" "$(( bc + 4 ))"
+  printf '%s3)%s ecdsa (521-bit)' "${C_GRAY}" "${RESET}"
+
+  cursor_move "$(( br + 6 ))" "$(( bc + 4 ))"
+  printf '%sSelect [1-3]:%s ' "${C_YELLOW}" "${RESET}"
+  cursor_show
+  local choice; IFS= read -r choice
+  cursor_hide
+
+  case "$choice" in
+    2) echo "rsa" ;;
+    3) echo "ecdsa" ;;
+    *) echo "ed25519" ;;
+  esac
+}
+
 # ── config management ─────────────────────────────────────────
 config_ensure() { touch "$CONFIG"; chmod 600 "$CONFIG"; }
 
-config_add_block() {  # alias keyfile username
+config_backup() {
+  if [[ -f "$CONFIG" ]]; then
+    cp "$CONFIG" "${CONFIG}.bak" 2>/dev/null || true
+  fi
+}
+
+config_add_block() {
   config_ensure
+  config_backup
   cat >> "$CONFIG" <<BLOCK
 
 # gh-accounts: $3
@@ -814,28 +976,60 @@ Host $1
 BLOCK
 }
 
-config_remove_block() {  # alias
+config_remove_block() {
   config_ensure
-  python3 - "$CONFIG" "$1" <<'PYEOF'
-import sys, re
-cfg = open(sys.argv[1]).read()
-pattern = r'\n# gh-accounts:.*?\nHost ' + re.escape(sys.argv[2]) + r'\b[^\n]*\n(?:[ \t]+[^\n]*\n)*'
-cfg2 = re.sub(pattern, '\n', cfg, flags=re.DOTALL)
-open(sys.argv[1], 'w').write(cfg2)
-PYEOF
+  config_backup
+  local alias="$1"
+  local tmp; tmp=$(mktemp)
+  local in_block=false
+  while IFS= read -r line; do
+    if [[ "$line" == *"# gh-accounts:"* ]]; then
+      in_block=true
+      continue
+    fi
+    if $in_block; then
+      if [[ "$line" == "Host "* ]] || [[ "$line" == "Host"*"$alias"* ]]; then
+        if [[ "$line" == *"Host $alias"* ]] || [[ "$line" == "Host $alias" ]]; then
+          in_block=false
+          continue
+        fi
+      fi
+      if [[ "$line" =~ ^[[:space:]] ]] || [[ -z "$line" ]]; then
+        continue
+      else
+        in_block=false
+      fi
+    fi
+    echo "$line" >> "$tmp"
+  done < "$CONFIG"
+  mv "$tmp" "$CONFIG"
+  chmod 600 "$CONFIG"
 }
 
 config_rewrite_all() {
   config_ensure
+  config_backup
   local primary; primary=$(store_get_primary)
-  # strip managed blocks
-  python3 - "$CONFIG" <<'PYEOF'
-import sys, re
-cfg = open(sys.argv[1]).read()
-cfg2 = re.sub(r'\n# gh-accounts:.*?\nHost \S+\n(?:[ \t]+[^\n]*\n)*', '\n', cfg, flags=re.DOTALL)
-open(sys.argv[1], 'w').write(cfg2.strip() + '\n')
-PYEOF
-  while IFS='|' read -r u e a k s; do
+  local tmp; tmp=$(mktemp)
+  local in_block=false
+  while IFS= read -r line; do
+    if [[ "$line" == *"# gh-accounts:"* ]]; then
+      in_block=true
+      continue
+    fi
+    if $in_block; then
+      if [[ "$line" =~ ^[[:space:]] ]] || [[ -z "$line" ]]; then
+        continue
+      else
+        in_block=false
+      fi
+    fi
+    echo "$line" >> "$tmp"
+  done < "$CONFIG"
+  mv "$tmp" "$CONFIG"
+  chmod 600 "$CONFIG"
+
+  while IFS='|' read -r u e a k s n; do
     [[ -z "$u" ]] && continue
     local host
     if [[ "$u" == "$primary" ]]; then
@@ -851,53 +1045,31 @@ PYEOF
 # ── state ──────────────────────────────────────────────────────
 SELECTED=0
 FILTER=""
-VIEW="accounts"
 FILTERED_ACCS=()
 ACC_COUNT=0
 RUNNING=true
-
-# Set local git user identity in repositories under $HOME that reference GitHub.
-set_local_git_identity_for_home() {
-  local name="$1" email="$2"
-  # exclude common large or state directories
-  local exclude=("$HOME/.cache" "$HOME/.local" "$HOME/.config" "$HOME/.cargo" "$HOME/.npm" "$HOME/.venv" "$HOME/.pyenv" "$HOME/.ssh")
-
-  # Build find command parts
-  local find_cmd=(find "$HOME")
-  for e in "${exclude[@]}"; do
-    find_cmd+=( -path "$e" -prune -o )
-  done
-  find_cmd+=( -type f -name config -path '*/.git/config' -print )
-
-  local cfg
-  while IFS= read -r cfg; do
-    local repo_root; repo_root=$(dirname "$(dirname "$cfg")")
-    # check remote urls for github reference
-    local url
-    url=$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)
-    if [[ -z "$url" ]]; then
-      url=$(git -C "$repo_root" remote -v 2>/dev/null | awk '{print $2; exit}' || true)
-    fi
-    if [[ -n "$url" && ( "$url" == *github.com* || "$url" == *git@github.com* ) ]]; then
-      git -C "$repo_root" config user.name "$name" 2>/dev/null || true
-      git -C "$repo_root" config user.email "$email" 2>/dev/null || true
-    fi
-  done < <("${find_cmd[@]}")
-}
+SORT_MODE="none"
 
 # ── actions ────────────────────────────────────────────────────
 action_add() {
-  local username="" email="" alias="" keyfile=""
-  show_form username email alias keyfile
+  local username="" email="" alias="" keyfile="" notes=""
+  show_form username email alias keyfile notes
 
   [[ -z "$username" || -z "$email" || -z "$alias" || -z "$keyfile" ]] && {
     full_redraw; draw_flash "all fields required" "${C_RED}"; full_redraw; return; }
+
+  if ! store_validate_field "$username" || ! store_validate_field "$email" || \
+     ! store_validate_field "$alias" || ! store_validate_field "$keyfile"; then
+    full_redraw; draw_flash "fields must not contain |" "${C_RED}"; full_redraw; return
+  fi
+
   store_exists "$username" && {
     full_redraw; draw_flash "account '${username}' already exists" "${C_RED}"; full_redraw; return; }
 
-  # keygen
+  local key_type="ed25519"
   if [[ ! -f "${SSH_DIR}/${keyfile}" ]]; then
-    local msg="Generating SSH key..."
+    key_type=$(show_key_type_selector)
+    local msg="Generating ${key_type} key..."
     local bw=$(( ${#msg} + 6 ))
     local bh=3
     local br=$(( ROWS / 2 - 1 ))
@@ -906,14 +1078,17 @@ action_add() {
     draw_box $br $bc $bw $bh "" "$C_CYAN"
     cursor_move $(( br + 1 )) $(( bc + 3 ))
     printf '%s%s%s' "${BOLD}" "$msg" "${RESET}"
-    ssh-keygen -t ed25519 -C "$email" -f "${SSH_DIR}/${keyfile}" -N "" &>/dev/null
+    local key_flag="-t ${key_type}"
+    [[ "$key_type" == "rsa" ]] && key_flag="-t rsa -b 4096"
+    [[ "$key_type" == "ecdsa" ]] && key_flag="-t ecdsa -b 521"
+    ssh-keygen $key_flag -C "$email" -f "${SSH_DIR}/${keyfile}" -N "" &>/dev/null
   fi
   ssh-add "${SSH_DIR}/${keyfile}" &>/dev/null || true
 
   local is_first=false
   [[ ! -s "$STORE" ]] && is_first=true
 
-  store_add "$username" "$email" "$alias" "$keyfile"
+  store_add "$username" "$email" "$alias" "$keyfile" "$notes"
 
   if $is_first; then
     git config --global user.name  "$username" 2>/dev/null || true
@@ -931,7 +1106,7 @@ action_add() {
 action_delete() {
   (( ACC_COUNT == 0 )) && return
   local entry="${FILTERED_ACCS[$SELECTED]}"
-  IFS='|' read -r u e a k s <<< "$entry"
+  IFS='|' read -r u e a k s n <<< "$entry"
   local primary; primary=$(store_get_primary)
 
   full_redraw
@@ -941,7 +1116,6 @@ action_delete() {
   store_remove "$u"
   [[ "$u" == "$primary" ]] && [[ -s "$STORE" ]] && {
     local new_prim; new_prim=$(head -1 "$STORE" | cut -d'|' -f1)
-    # give it github.com slot
     config_rewrite_all
     local np_email; np_email=$(store_get_field "$new_prim" 2)
     git config --global user.name  "$new_prim"  2>/dev/null || true
@@ -956,7 +1130,7 @@ action_delete() {
 action_set_primary() {
   (( ACC_COUNT == 0 )) && return
   local entry="${FILTERED_ACCS[$SELECTED]}"
-  IFS='|' read -r u e a k s <<< "$entry"
+  IFS='|' read -r u e a k s n <<< "$entry"
   local current; current=$(store_get_primary)
   [[ "$u" == "$current" ]] && { draw_flash "${u} is already primary" "${C_YELLOW}"; full_redraw; return; }
 
@@ -973,10 +1147,30 @@ action_set_primary() {
   full_redraw
 }
 
+action_test_one() {
+  local entry="$1"
+  IFS='|' read -r u e a k s n <<< "$entry"
+  local primary; primary=$(store_get_primary)
+  local host; [[ "$u" == "$primary" ]] && host="github.com" || host="$a"
+
+  local result
+  if result=$(ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+      -i "${SSH_DIR}/${k}" "git@${host}" 2>&1); then
+    store_set_status "$u" "ok"
+    return 0
+  elif echo "$result" | grep -q "successfully authenticated"; then
+    store_set_status "$u" "ok"
+    return 0
+  else
+    store_set_status "$u" "fail"
+    return 1
+  fi
+}
+
 action_test() {
   (( ACC_COUNT == 0 )) && return
   local entry="${FILTERED_ACCS[$SELECTED]}"
-  IFS='|' read -r u e a k s <<< "$entry"
+  IFS='|' read -r u e a k s n <<< "$entry"
   local primary; primary=$(store_get_primary)
   local host; [[ "$u" == "$primary" ]] && host="github.com" || host="$a"
 
@@ -990,19 +1184,197 @@ action_test() {
   cursor_move $(( br + 1 )) $(( bc + 3 ))
   printf '%s%s%s' "${BOLD}" "$msg" "${RESET}"
 
-  local result
-  if result=$(ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-      -i "${SSH_DIR}/${k}" "git@${host}" 2>&1); then
-    store_set_status "$u" "ok"
+  if action_test_one "$entry"; then
     full_redraw; draw_flash "✔ ${u}: authenticated" "${C_GREEN}"
   else
-    if echo "$result" | grep -q "successfully authenticated"; then
+    full_redraw; draw_flash "✖ ${u}: auth failed" "${C_RED}"
+  fi
+  full_redraw
+}
+
+action_test_all() {
+  (( ACC_COUNT == 0 )) && return
+
+  local msg="Testing all accounts..."
+  local bw=$(( ${#msg} + 6 ))
+  local bh=3
+  local br=$(( ROWS / 2 - 1 ))
+  local bc=$(( (COLS - bw) / 2 ))
+  clear_area $br $bc $bw $bh
+  draw_box $br $bc $bw $bh "" "$C_CYAN"
+  cursor_move $(( br + 1 )) $(( bc + 3 ))
+  printf '%s%s%s' "${BOLD}" "$msg" "${RESET}"
+
+  local pass=0 fail=0 total=0
+  local primary; primary=$(store_get_primary)
+  while IFS='|' read -r u e a k s n; do
+    [[ -z "$u" ]] && continue
+    (( total++ ))
+    local host; [[ "$u" == "$primary" ]] && host="github.com" || host="$a"
+    local result
+    if result=$(ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -i "${SSH_DIR}/${k}" "git@${host}" 2>&1); then
       store_set_status "$u" "ok"
-      full_redraw; draw_flash "✔ ${u}: authenticated" "${C_GREEN}"
+      (( pass++ ))
+    elif echo "$result" | grep -q "successfully authenticated"; then
+      store_set_status "$u" "ok"
+      (( pass++ ))
     else
       store_set_status "$u" "fail"
-      full_redraw; draw_flash "✖ ${u}: auth failed" "${C_RED}"
+      (( fail++ ))
     fi
+  done < "$STORE"
+
+  full_redraw
+  draw_flash "✔ ${pass}/${total} passed, ${fail} failed" "$( (( fail == 0 )) && echo "${C_GREEN}" || echo "${C_YELLOW}" )"
+  full_redraw
+}
+
+action_import() {
+  local -a existing_keys=()
+  for f in "${SSH_DIR}"/id_* "${SSH_DIR}"/*.pub; do
+    [[ -f "$f" ]] || continue
+    [[ "$f" == *.pub ]] && continue
+    local base; base=$(basename "$f")
+    if ! grep -q "|${base}|" "$STORE" 2>/dev/null; then
+      existing_keys+=("$base")
+    fi
+  done
+
+  if (( ${#existing_keys[@]} == 0 )); then
+    draw_flash "No unimported keys found" "${C_GRAY}"
+    full_redraw
+    return
+  fi
+
+  local bw=50 bh=$(( ${#existing_keys[@]} + 6 ))
+  (( bh < 8 )) && bh=8
+  local br=$(( (ROWS - bh) / 2 ))
+  local bc=$(( (COLS - bw) / 2 ))
+
+  clear_area $br $bc $bw $bh
+  draw_box $br $bc $bw $bh "Import SSH Key" "$C_CYAN"
+
+  local row=$(( br + 2 ))
+  local idx=1
+  for k in "${existing_keys[@]}"; do
+    cursor_move "$row" $(( bc + 4 ))
+    printf '%s%s)%s %s' "${C_GREEN}${BOLD}" "$idx" "${RESET}" "$k"
+    (( row++ ))
+    (( idx++ ))
+  done
+
+  cursor_move "$(( row + 1 ))" $(( bc + 4 ))
+  printf '%sEnter number to import (or Enter to skip):%s ' "${C_YELLOW}" "${RESET}"
+  cursor_show
+  local choice; IFS= read -r choice
+  cursor_hide
+
+  if [[ -z "$choice" ]] || ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#existing_keys[@]} )); then
+    full_redraw
+    return
+  fi
+
+  local selected_key="${existing_keys[$(( choice - 1 ))]}"
+  local pubkey_file="${SSH_DIR}/${selected_key}.pub"
+  local email_from_key=""
+  if [[ -f "$pubkey_file" ]]; then
+    email_from_key=$(awk '{print $NF}' "$pubkey_file" | sed 's/^.*://;s/>$//')
+  fi
+
+  local bw2=56 bh2=8
+  local br2=$(( (ROWS - bh2) / 2 ))
+  local bc2=$(( (COLS - bw2) / 2 ))
+  clear_area $br2 $bc2 $bw2 $bh2
+  draw_box $br2 $bc2 $bw2 $bh2 "Import: ${selected_key}" "$C_BLUE"
+
+  local username="" email="$email_from_key" alias="" notes=""
+  cursor_move "$(( br2 + 2 ))" "$(( bc2 + 3 ))"
+  printf '%s%-12s%s' "${C_GRAY}" "Username:" "${RESET}"
+  cursor_move "$(( br2 + 2 ))" "$(( bc2 + 17 ))"
+  printf '%s' "${C_CYAN}"
+  cursor_show
+  IFS= read -r username
+  cursor_hide
+
+  cursor_move "$(( br2 + 3 ))" "$(( bc2 + 3 ))"
+  printf '%s%-12s%s' "${C_GRAY}" "Email:" "${RESET}"
+  cursor_move "$(( br2 + 3 ))" "$(( bc2 + 17 ))"
+  printf '%s%s%s' "${C_CYAN}" "$email" "${RESET}"
+  cursor_move "$(( br2 + 3 ))" "$(( bc2 + 17 + ${#email} ))"
+  cursor_show
+  IFS= read -r -e -i "$email" email
+  cursor_hide
+
+  [[ -z "$username" ]] && { full_redraw; return; }
+  alias="github-${username}"
+
+  store_add "$username" "$email" "$alias" "$selected_key" "$notes"
+  config_add_block "$alias" "$selected_key" "$username"
+
+  full_redraw
+  draw_flash "✔ imported ${username} (${selected_key})" "${C_GREEN}"
+  full_redraw
+}
+
+action_rotate() {
+  (( ACC_COUNT == 0 )) && return
+  local entry="${FILTERED_ACCS[$SELECTED]}"
+  IFS='|' read -r u e a k s n <<< "$entry"
+
+  full_redraw
+  show_confirm "rotate SSH key for '${u}'?" || { full_redraw; return; }
+
+  local msg="Rotating key for ${u}..."
+  local bw=$(( ${#msg} + 6 ))
+  local bh=3
+  local br=$(( ROWS / 2 - 1 ))
+  local bc=$(( (COLS - bw) / 2 ))
+  clear_area $br $bc $bw $bh
+  draw_box $br $bc $bw $bh "" "$C_CYAN"
+  cursor_move $(( br + 1 )) $(( bc + 3 ))
+  printf '%s%s%s' "${BOLD}" "$msg" "${RESET}"
+
+  local old_key="${SSH_DIR}/${k}"
+  [[ -f "$old_key" ]] && mv "$old_key" "${old_key}.old" 2>/dev/null || true
+  [[ -f "${old_key}.pub" ]] && mv "${old_key}.pub" "${old_key}.pub.old" 2>/dev/null || true
+
+  ssh-keygen -t ed25519 -C "$e" -f "${SSH_DIR}/${k}" -N "" &>/dev/null
+  ssh-add "${SSH_DIR}/${k}" &>/dev/null || true
+
+  full_redraw
+  draw_flash "✔ key rotated for ${u}" "${C_GREEN}"
+  full_redraw
+}
+
+action_verify() {
+  (( ACC_COUNT == 0 )) && return
+  local entry="${FILTERED_ACCS[$SELECTED]}"
+  IFS='|' read -r u e a k s n <<< "$entry"
+
+  local msg="Verifying ${e} via GitHub API..."
+  local bw=$(( ${#msg} + 6 ))
+  local bh=3
+  local br=$(( ROWS / 2 - 1 ))
+  local bc=$(( (COLS - bw) / 2 ))
+  clear_area $br $bc $bw $bh
+  draw_box $br $bc $bw $bh "" "$C_CYAN"
+  cursor_move $(( br + 1 )) $(( bc + 3 ))
+  printf '%s%s%s' "${BOLD}" "$msg" "${RESET}"
+
+  local api_result
+  if api_result=$(curl -s "https://api.github.com/search/users?q=${u}" 2>/dev/null); then
+    local found_user; found_user=$(echo "$api_result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['items'][0]['login'] if d.get('items') else '')" 2>/dev/null || true)
+    if [[ "$found_user" == "$u" ]]; then
+      full_redraw
+      draw_flash "✔ GitHub user '${u}' verified" "${C_GREEN}"
+    else
+      full_redraw
+      draw_flash "✖ GitHub user '${u}' not found" "${C_RED}"
+    fi
+  else
+    full_redraw
+    draw_flash "API request failed (check internet)" "${C_RED}"
   fi
   full_redraw
 }
@@ -1010,7 +1382,7 @@ action_test() {
 action_repo_modal() {
   (( ACC_COUNT == 0 )) && return
   local entry="${FILTERED_ACCS[$SELECTED]}"
-  IFS='|' read -r u e a k s <<< "$entry"
+  IFS='|' read -r u e a k s n <<< "$entry"
   local primary; primary=$(store_get_primary)
   local is_prim=false; [[ "$u" == "$primary" ]] && is_prim=true
 
@@ -1019,11 +1391,22 @@ action_repo_modal() {
   full_redraw
 }
 
+action_sort() {
+  case "$SORT_MODE" in
+    none) SORT_MODE="name" ;;
+    name) SORT_MODE="status" ;;
+    status) SORT_MODE="role" ;;
+    role) SORT_MODE="none" ;;
+  esac
+  full_redraw
+  draw_flash "sort: ${SORT_MODE}" "${C_CYAN}"
+  full_redraw
+}
+
 action_filter_start() {
   FILTER=""
   draw_filter_bar
   cursor_show
-  # read chars until enter/esc
   while true; do
     local key; key=$(read_key)
     case "$key" in
@@ -1053,27 +1436,57 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 trap full_redraw SIGWINCH
 
-# ── main loop ──────────────────────────────────────────────────
+# ── main ──────────────────────────────────────────────────────
 if [[ ! -t 0 ]]; then
   echo "error: gh-accounts requires an interactive terminal." >&2
   exit 1
 fi
 store_init
+store_migrate
+ensure_ssh_agent
 alt_screen_on
 cursor_hide
 full_redraw
 
+PAGE_SIZE=10
+
 while $RUNNING; do
   key=$(read_key)
   case "$key" in
-    $'\033[A'|k) (( SELECTED > 0 )) && (( SELECTED-- )); draw_table ;;
-    $'\033[B'|j) (( SELECTED < ACC_COUNT - 1 )) && (( SELECTED++ )); draw_table ;;
+    $'\033[A'|k) (( SELECTED > 0 )) && (( SELECTED-- )); full_redraw ;;
+    $'\033[B'|j) (( SELECTED < ACC_COUNT - 1 )) && (( SELECTED++ )); full_redraw ;;
+    $'\033[5~')
+      (( SELECTED > PAGE_SIZE )) && (( SELECTED -= PAGE_SIZE )) || SELECTED=0
+      full_redraw
+      ;;
+    $'\033[6~')
+      (( SELECTED < ACC_COUNT - PAGE_SIZE )) && (( SELECTED += PAGE_SIZE )) || SELECTED=$(( ACC_COUNT - 1 ))
+      full_redraw
+      ;;
+    $'\004')
+      (( SELECTED > PAGE_SIZE )) && (( SELECTED -= PAGE_SIZE )) || SELECTED=0
+      full_redraw
+      ;;
+    $'\025')
+      (( SELECTED < ACC_COUNT - PAGE_SIZE )) && (( SELECTED += PAGE_SIZE )) || SELECTED=$(( ACC_COUNT - 1 ))
+      full_redraw
+      ;;
     a) action_add ;;
     d|$'\177') action_delete ;;
     s) action_set_primary ;;
     t) action_test ;;
+    T) action_test_all ;;
     r) action_repo_modal ;;
+    i) action_import ;;
+    R) action_rotate ;;
+    V) action_verify ;;
     /) action_filter_start ;;
+    S) action_sort ;;
+    '?')
+      full_redraw
+      draw_help
+      full_redraw
+      ;;
     $'\033') FILTER=""; full_redraw ;;
     q|Q) RUNNING=false ;;
     *) true ;;
