@@ -16,7 +16,7 @@ Options:
 USAGE
 }
 
-BIN_DIR="$(pwd)/bin"
+BIN_DIR="/usr/local/bin"
 
 while [[ ${1:-} != "" ]]; do
     case "$1" in
