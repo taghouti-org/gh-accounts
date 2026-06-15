@@ -145,17 +145,7 @@ store_set_primary() {
 }
 
 store_set_status() {  # username status
-  local tmp; tmp=$(mktemp)
-  sed "s/^$1|\(.*\)|\(.*\)|\(.*\)|.*$/$1|\2|\3|\4|$2/" "$STORE" > "$tmp" || true
-  # simpler: rebuild line
-  local email alias keyfile
-  email=$(store_get_field "$1" 2)
-  alias=$(store_get_field "$1" 3)
-  keyfile=$(store_get_field "$1" 4)
-  grep -v "^$1|" "$STORE" > "$tmp" || true
-  # insert at correct position
   local final; final=$(mktemp)
-  # re-read original preserving order
   while IFS='|' read -r u e a k s; do
     if [[ "$u" == "$1" ]]; then
       echo "$u|$e|$a|$k|$2"
@@ -968,62 +958,16 @@ action_set_primary() {
   local entry="${FILTERED_ACCS[$SELECTED]}"
   IFS='|' read -r u e a k s <<< "$entry"
   local current; current=$(store_get_primary)
-  [[ "$u" == "$current" ]] && { draw_flash "${u} is already primary" "${C_GRAY}"; full_redraw; return; }
+  [[ "$u" == "$current" ]] && { draw_flash "${u} is already primary" "${C_YELLOW}"; full_redraw; return; }
 
   store_set_primary "$u"
-  # Re-read fields from the store to ensure we have the canonical values
-  GIT_PRIMARY_USER="$u"
-  GIT_PRIMARY_EMAIL=$(store_get_field "$u" 2)
-  GIT_PRIMARY_ALIAS=$(store_get_field "$u" 3)
-  GIT_PRIMARY_KEY=$(store_get_field "$u" 4)
-  # Debug: record what values we're about to write
-  printf '%s\n' "DEBUG: action_set_primary user='$GIT_PRIMARY_USER' email='$GIT_PRIMARY_EMAIL' alias='$GIT_PRIMARY_ALIAS' key='$GIT_PRIMARY_KEY'" >> "$HOME/.gh_accounts_debug" 2>/dev/null || true
-  if [[ -z "$GIT_PRIMARY_USER" || -z "$GIT_PRIMARY_EMAIL" ]]; then
-    draw_flash "ERROR: empty user or email (user='$GIT_PRIMARY_USER' email='$GIT_PRIMARY_EMAIL')" "${C_RED}"
-    full_redraw
-    return
-  fi
   config_rewrite_all
+
   if command -v git >/dev/null 2>&1; then
-    # Set global identity (preferred)
-    git config --global user.name "$GIT_PRIMARY_USER" 2>/dev/null || true
-    git config --global user.email "$GIT_PRIMARY_EMAIL" 2>/dev/null || true
-
-    # verify global config was written; if not, fall back to editing ~/.gitconfig
-    local gname
-    gname=$(git config --global user.name 2>/dev/null || true)
-
-    # Debug: record resulting git global config and file contents
-    printf '%s\n' "DEBUG: git.global.name='$(git config --global user.name 2>/dev/null || true)'" >> "$HOME/.gh_accounts_debug" 2>/dev/null || true
-    printf '%s\n' "DEBUG: git.global.email='$(git config --global user.email 2>/dev/null || true)'" >> "$HOME/.gh_accounts_debug" 2>/dev/null || true
-    printf '%s\n' "DEBUG: ~/.gitconfig contents:" >> "$HOME/.gh_accounts_debug" 2>/dev/null || true
-    sed -n '1,120p' "$HOME/.gitconfig" >> "$HOME/.gh_accounts_debug" 2>/dev/null || true
-
-    # Fallback: if git global config is still empty, write ~/.gitconfig directly
-    if [[ -z "$gname" ]]; then
-      printf 'DEBUG: FINAL fallback write, fallback_name="%s" fallback_email="%s"\n' "$GIT_PRIMARY_USER" "$GIT_PRIMARY_EMAIL" >> "$HOME/.gh_accounts_debug"
-      if [[ -z "$GIT_PRIMARY_USER" || -z "$GIT_PRIMARY_EMAIL" ]]; then
-        printf 'DEBUG: ERROR: fallback_name or fallback_email is empty at FINAL fallback!\n' >> "$HOME/.gh_accounts_debug"
-      fi
-      tmpcfg=$(mktemp)
-      printf '[user]\nname = %s\nemail = %s\n' "$GIT_PRIMARY_USER" "$GIT_PRIMARY_EMAIL" > "$tmpcfg"
-      cat "$tmpcfg" >> "$HOME/.gh_accounts_debug"
-      mv "$tmpcfg" "$HOME/.gitconfig"
-    fi
-
-    # If we're in a git working tree, also set local identity so tools that
-    # use `-c user.useConfigOnly=true` or repo-only configs have an identity.
-    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      git config user.name "$GIT_PRIMARY_USER" 2>/dev/null || true
-      git config user.email "$GIT_PRIMARY_EMAIL" 2>/dev/null || true
-    fi
+    git config --global user.name "$u" 2>/dev/null || true
+    git config --global user.email "$e" 2>/dev/null || true
   fi
-  # Also set local config for nearby GitHub repos under $HOME whose remotes
-  # reference GitHub — this helps tools that call Git with
-  # `-c user.useConfigOnly=true`, which ignore global config.
-  if command -v git >/dev/null 2>&1; then
-    set_local_git_identity_for_home "$GIT_PRIMARY_USER" "$GIT_PRIMARY_EMAIL"
-  fi
+
   full_redraw
   draw_flash "★ ${u} is now primary" "${C_YELLOW}"
   full_redraw
