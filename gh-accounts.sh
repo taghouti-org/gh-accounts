@@ -264,9 +264,9 @@ draw_info_box() {
 draw_logo() {
   (( COLS < 85 )) && return
   local col=$(( COLS - 37 ))
-  t_move 2 "$col"; printf '%s┌─┐┬ ┬  ┌─┐┌─┐┌─┐┌─┐┬ ┬┌┐┌┬┌─┐%s' "$CC" "$R"
+  t_move 2 "$col"; printf '%s┌─┐┬ ┬  ┌─┐┌─┐┌─┐┌─┐┬ ┬┌┐┌┌┬┐┌─┐%s' "$CC" "$R"
   t_move 3 "$col"; printf '%s│ ┬├─┤  ├─┤│  │  │ ││ ││││ │ └─┐%s' "$CB" "$R"
-  t_move 4 "$col"; printf '%s└─┘┴   ┴ ┴└─┘└─┘└─┘└─┘┴┘└ ┴ └─┘%s' "$CY" "$R"
+  t_move 4 "$col"; printf '%s└─┘┴ ┴  ┴ ┴└─┘└─┘└─┘└─┘┘└┘ ┴ └─┘%s' "$CY" "$R"
   t_move 5 "$col"; printf '%s GitHub SSH Account Manager TUI %s'  "${CGR}${DIM}" "$R"
 }
 
@@ -376,7 +376,7 @@ _render_row() {
   (( pad > 0 )) && rept "$pad" ' '
 
   printf '%s' "$R"
-  printf '%s│%s' "$CBR" "$R"
+  printf '%s │%s' "$CBR" "$R"
 }
 
 _render_empty_row() {
