@@ -299,8 +299,6 @@ draw_col_header() {
 }
 
 # ── table rendering ───────────────────────────────────────────
-# Renders exactly one account row at the given terminal row.
-# All state comes from globals; no partial-update path.
 _render_row() {
   local idx=$1 screen_row=$2
   local entry="${FILTERED_ACCS[$idx]}"
@@ -392,7 +390,7 @@ _load_filtered() {
   local -A seen=()
   while IFS='|' read -r u e a k s n; do
     [[ -z "$u" ]] && continue
-    [[ -n "${seen[$u]:-}" ]] && continue   # skip any runtime duplicates too
+    [[ -n "${seen[$u]:-}" ]] && continue
     if [[ -n "$FILTER" ]]; then
       local combined="${u}${e}${a}${n:-}"
       [[ "${combined,,}" != *"${FILTER,,}"* ]] && continue
@@ -402,7 +400,6 @@ _load_filtered() {
   done < "$STORE"
   FILTERED_ACCS=("${accs[@]}")
 
-  # sort
   case "$SORT_MODE" in
     name)
       local tmp; tmp=$(mktemp)
@@ -435,13 +432,11 @@ draw_table() {
   update_dims
   _load_filtered
 
-  local vis=$(( ROWS - 13 ))   # visible data rows in the box
+  local vis=$(( ROWS - 13 ))
 
-  # compute scroll so selected is always visible
   local scroll=0
   (( SELECTED >= vis )) && scroll=$(( SELECTED - vis + 1 ))
 
-  # render data rows
   local row=0 i
   for (( i=scroll; i<ACC_COUNT; i++ )); do
     (( row >= vis )) && break
@@ -449,12 +444,10 @@ draw_table() {
     (( row++ ))
   done
 
-  # blank remaining rows
   for (( ; row<vis; row++ )); do
     _render_empty_row "$(( 11 + row ))"
   done
 
-  # empty-state message
   if (( ACC_COUNT == 0 )); then
     local msg="No accounts · Press 'a' to add one"
     [[ -n "$FILTER" ]] && msg="No accounts match '${FILTER}'"
@@ -547,7 +540,6 @@ draw_detail() {
     last=$(( last+2 ))
   fi
 
-  # clear any leftover lines below
   local p
   for (( p=last+1; p<=ROWS-3; p++ )); do
     t_move "$p" "$(( col+1 ))"; rept "$dw" ' '
@@ -750,6 +742,72 @@ show_repo_modal() {
 cfg_ensure() { touch "$CONFIG"; chmod 600 "$CONFIG"; }
 cfg_backup() { [[ -f "$CONFIG" ]] && cp "$CONFIG" "${CONFIG}.bak" 2>/dev/null || true; }
 
+# _cfg_strip_managed: write CONFIG to stdout with ALL gh-accounts blocks removed.
+#
+# State machine:
+#   normal  – echoing lines as-is; a "# gh-accounts:" comment transitions to → comment
+#   comment – we saw the marker comment and are skipping it; the very next non-blank
+#             line must be the "Host …" directive → block; anything else is unexpected,
+#             we fall back to normal and emit what we skipped
+#   block   – inside a managed Host block; blank lines and indented (^[[:space:]])
+#             lines belong to the block and are skipped; the first non-blank,
+#             non-indented line ends the block (transition back to normal or comment)
+#
+# This correctly handles:
+#   • blank separator lines before/between blocks
+#   • unmanaged Host entries immediately after a managed block
+#   • back-to-back managed blocks with no separators
+_cfg_strip_managed() {
+  local state="normal" saved=""
+  while IFS= read -r line; do
+    case "$state" in
+
+      normal)
+        if [[ "$line" == "# gh-accounts:"* ]]; then
+          state="comment"
+          saved="$line"
+        else
+          printf '%s\n' "$line"
+        fi
+        ;;
+
+      comment)
+        # Skip blank lines between the marker and the Host directive
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ^Host([[:space:]]|$) ]]; then
+          # This is the managed Host line — enter block-skip mode
+          state="block"
+        else
+          # Unexpected: not a Host line after the marker.
+          # Emit the saved comment and current line, resume normal.
+          printf '%s\n' "$saved"
+          printf '%s\n' "$line"
+          state="normal"
+        fi
+        saved=""
+        ;;
+
+      block)
+        # Blank or indented lines belong to the block — skip them
+        if [[ -z "$line" || "$line" =~ ^[[:space:]] ]]; then
+          continue
+        fi
+        # Non-blank, non-indented line ends the block
+        if [[ "$line" == "# gh-accounts:"* ]]; then
+          # Immediately start another managed block
+          state="comment"
+          saved="$line"
+        else
+          # Unmanaged content follows — emit and resume normal
+          state="normal"
+          printf '%s\n' "$line"
+        fi
+        ;;
+
+    esac
+  done < "$CONFIG"
+}
+
 cfg_add_block() {   # cfg_add_block HOST KEYFILE USERNAME
   cfg_ensure; cfg_backup
   cat >> "$CONFIG" <<EOF
@@ -762,43 +820,98 @@ Host $1
 EOF
 }
 
-cfg_remove_block() {   # cfg_remove_block HOST_ALIAS
+# cfg_remove_block HOST_ALIAS
+# Removes the single managed block whose Host directive matches HOST_ALIAS.
+# Uses the same state machine as _cfg_strip_managed, extended to distinguish
+# the target host from other managed hosts that must be preserved.
+cfg_remove_block() {
+  local target="$1"
   cfg_ensure; cfg_backup
+
   local tmp; tmp=$(mktemp)
-  local skip=false
+  local state="normal" saved_comment="" host_line=""
+
   while IFS= read -r line; do
-    if [[ "$line" == "# gh-accounts:"* ]]; then
-      skip=true; continue
-    fi
-    if $skip; then
-      [[ "$line" =~ ^[[:space:]] || -z "$line" ]] && continue
-      skip=false
-      # The line that ended the block is a new Host — check if it's ours
-      if [[ "$line" == "Host $1" || "$line" == "Host $1 "* ]]; then
-        skip=true; continue
-      fi
-    fi
-    echo "$line" >> "$tmp"
+    case "$state" in
+
+      normal)
+        if [[ "$line" == "# gh-accounts:"* ]]; then
+          state="comment"
+          saved_comment="$line"
+        else
+          printf '%s\n' "$line" >> "$tmp"
+        fi
+        ;;
+
+      comment)
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ^Host([[:space:]]|$) ]]; then
+          host_line="$line"
+          # Extract the first Host token
+          local host_val="${line#Host}"
+          host_val="${host_val#"${host_val%%[! ]*}"}"   # ltrim spaces
+          host_val="${host_val%% *}"                     # first word
+          if [[ "$host_val" == "$target" ]]; then
+            state="skip"    # drop this block
+          else
+            state="keep"    # preserve this block
+            printf '%s\n' "$saved_comment" >> "$tmp"
+            printf '%s\n' "$host_line"     >> "$tmp"
+          fi
+        else
+          # Unexpected — preserve what we buffered
+          printf '%s\n' "$saved_comment" >> "$tmp"
+          printf '%s\n' "$line"          >> "$tmp"
+          state="normal"
+        fi
+        saved_comment=""; host_line=""
+        ;;
+
+      skip)
+        # Drop blank and indented lines belonging to the target block
+        if [[ -z "$line" || "$line" =~ ^[[:space:]] ]]; then
+          continue
+        fi
+        # End of target block
+        if [[ "$line" == "# gh-accounts:"* ]]; then
+          state="comment"; saved_comment="$line"
+        else
+          state="normal"; printf '%s\n' "$line" >> "$tmp"
+        fi
+        ;;
+
+      keep)
+        printf '%s\n' "$line" >> "$tmp"
+        # Non-blank, non-indented line ends the kept block
+        if [[ -n "$line" && ! "$line" =~ ^[[:space:]] ]]; then
+          if [[ "$line" == "# gh-accounts:"* ]]; then
+            # Already written above; switch to comment mode but don't double-print
+            # Undo last write and buffer the comment instead
+            truncate -s "$(( $(stat -c%s "$tmp") - ${#line} - 1 ))" "$tmp" 2>/dev/null || true
+            state="comment"; saved_comment="$line"
+          else
+            state="normal"
+          fi
+        fi
+        ;;
+
+    esac
   done < "$CONFIG"
+
   mv "$tmp" "$CONFIG"; chmod 600 "$CONFIG"
 }
 
+# cfg_rewrite_all: strip every managed block then re-append all accounts from store.
 cfg_rewrite_all() {
   cfg_ensure; cfg_backup
   local primary; primary=$(store_get_primary)
-  # Strip all managed blocks
+
+  # Strip all managed blocks into a temp file, then replace CONFIG
   local tmp; tmp=$(mktemp)
-  local skip=false
-  while IFS= read -r line; do
-    if [[ "$line" == "# gh-accounts:"* ]]; then skip=true; continue; fi
-    if $skip; then
-      [[ "$line" =~ ^[[:space:]] || -z "$line" ]] && continue
-      skip=false
-    fi
-    echo "$line" >> "$tmp"
-  done < "$CONFIG"
+  _cfg_strip_managed > "$tmp"
   mv "$tmp" "$CONFIG"; chmod 600 "$CONFIG"
-  # Re-append all accounts
+
+  # Re-append one block per account
   while IFS='|' read -r u e a k s n; do
     [[ -z "$u" ]] && continue
     local host; [[ "$u" == "$primary" ]] && host="github.com" || host="$a"
@@ -856,16 +969,17 @@ action_delete() {
   local entry="${FILTERED_ACCS[$SELECTED]}"
   local u e a k s n; IFS='|' read -r u e a k s n <<< "$entry"
   local primary; primary=$(store_get_primary)
+  local was_primary=false; [[ "$u" == "$primary" ]] && was_primary=true
 
   full_redraw
   show_confirm "Remove '${u}'? (key files are kept)" || { full_redraw; return; }
 
-  local host; [[ "$u" == "$primary" ]] && host="github.com" || host="$a"
-  cfg_remove_block "$host"
+  # Remove from store FIRST so cfg_rewrite_all regenerates without this account
   store_remove "$u"
+  cfg_rewrite_all
 
-  if [[ "$u" == "$primary" ]] && [[ -s "$STORE" ]]; then
-    cfg_rewrite_all
+  # If we removed the primary, promote the new first entry and update git globals
+  if $was_primary && [[ -s "$STORE" ]]; then
     local np; np=$(store_get_primary)
     local ne; ne=$(store_get_field "$np" 2)
     git config --global user.name  "$np" 2>/dev/null || true
