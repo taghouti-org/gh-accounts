@@ -80,6 +80,7 @@ store_migrate() {
   # Ensure 6 fields per line and remove duplicate usernames
   local tmp; tmp=$(mktemp)
   local -A seen=()
+  local u e a k s rest
   while IFS='|' read -r u e a k s rest; do
     [[ -z "$u" ]] && continue
     [[ -n "${seen[$u]:-}" ]] && continue   # skip duplicate
@@ -122,6 +123,7 @@ store_set_primary() {
 
 store_set_field() {   # store_set_field USER FIELDNUM VALUE
   local tmp; tmp=$(mktemp)
+  local u e a k s n
   while IFS='|' read -r u e a k s n; do
     if [[ "$u" == "$1" ]]; then
       local -a f=("$u" "$e" "$a" "$k" "$s" "${n:-}")
@@ -388,6 +390,7 @@ _render_empty_row() {
 _load_filtered() {
   local -a accs=()
   local -A seen=()
+  local u e a k s n
   while IFS='|' read -r u e a k s n; do
     [[ -z "$u" ]] && continue
     [[ -n "${seen[$u]:-}" ]] && continue
@@ -758,7 +761,7 @@ cfg_backup() { [[ -f "$CONFIG" ]] && cp "$CONFIG" "${CONFIG}.bak" 2>/dev/null ||
 #   • unmanaged Host entries immediately after a managed block
 #   • back-to-back managed blocks with no separators
 _cfg_strip_managed() {
-  local state="normal" saved=""
+  local state="normal" saved="" line
   while IFS= read -r line; do
     case "$state" in
 
@@ -829,7 +832,7 @@ cfg_remove_block() {
   cfg_ensure; cfg_backup
 
   local tmp; tmp=$(mktemp)
-  local state="normal" saved_comment="" host_line=""
+  local state="normal" saved_comment="" host_line="" line
 
   while IFS= read -r line; do
     case "$state" in
@@ -912,6 +915,7 @@ cfg_rewrite_all() {
   mv "$tmp" "$CONFIG"; chmod 600 "$CONFIG"
 
   # Re-append one block per account
+  local u e a k s n
   while IFS='|' read -r u e a k s n; do
     [[ -z "$u" ]] && continue
     local host; [[ "$u" == "$primary" ]] && host="github.com" || host="$a"
@@ -1049,6 +1053,7 @@ action_test_all() {
   draw_box "$br" "$bc" "$bw" 3 "" "$CC"
   t_move "$(( br+1 ))" "$(( bc+3 ))"; printf '%s%s%s' "$BOLD" "$msg" "$R"
   local pass=0 fail=0 total=0
+  local u e a k s n
   while IFS='|' read -r u e a k s n; do
     [[ -z "$u" ]] && continue
     (( total++ ))
@@ -1060,6 +1065,7 @@ action_test_all() {
 
 action_import() {
   local -a keys=()
+  local f
   for f in "${SSH_DIR}"/id_* "${SSH_DIR}"/*.pub; do
     [[ -f "$f" && "$f" != *.pub ]] || continue
     local base; base=$(basename "$f")
@@ -1077,6 +1083,7 @@ action_import() {
   clear_area "$br" "$bc" "$bw" "$bh"
   draw_box "$br" "$bc" "$bw" "$bh" "Import SSH Key" "$CC"
   local row=$(( br+2 )) idx=1
+  local k
   for k in "${keys[@]}"; do
     t_move "$row" "$(( bc+4 ))"; printf '%s%s)%s %s' "${CG}${BOLD}" "$idx" "$R" "$k"
     (( row++ )); (( idx++ ))
